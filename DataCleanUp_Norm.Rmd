@@ -1,0 +1,205 @@
+---
+title: "Data Clean Up & Normalization"
+author: "Kilicali Isildayancan"
+output:
+  html_document:
+    df_print: paged
+---
+### Brief introduction to the research on SSRI-resistant neurons
+
+Mental health and its important role in the quality of life have only been recently addressed as a healthcare problem, and systemic approaches to solutions are rooted in our understanding in the biology of these systems. Although the interest in this field increases on a rapid pace, anecdotal evidence suggests that therapies are far from optimal in treating these phenomenon. Following from this, the research paper focuses on Major Depressive Disorder (MDD) and patients who are resistant to the most common drug type (SSRIs). The authors use iPSCs to mimic the disease at a molecular level. There are 3 categories of 9 samples in total: H (healthy), R (remitters, SSRI-responsive), and NR (non-remitters, SSRI-resistant).
+
+
+### Expression Data For GSE125664
+
+```{r getGSE, echo=FALSE, results=FALSE, message=FALSE}
+gse <- GEOquery::getGEO('GSE125664', GSEMatrix = FALSE)
+knitr::kable(data.frame(head(GEOquery::Meta(gse))))
+```
+
+```{r getGPL, echo=FALSE, results=FALSE}
+gpl <- names(GEOquery::GPLList(gse))[1]
+gplInfo <- GEOquery::Meta(GEOquery::getGEO(gpl))
+```
+
+#### Information about the technology
+
+Title: `r gplInfo$title`
+
+Data Submission: `r gplInfo$submission_date`
+
+Last update: `r gplInfo$last_update_date`
+
+Organism: `r gplInfo$title`
+
+Number of datasets that use this technology: `r length(gplInfo$series_id)`
+
+Number of samples that use this technology: `r length(gplInfo$sample_id)`
+
+```{r getSuppFiles, echo=FALSE}
+suppFiles <- GEOquery::getGEOSuppFiles('GSE125664')
+fileNames <- rownames(suppFiles)
+# there is only one supplemental file
+expressionDF <- read.delim(fileNames[1], header=TRUE,
+check.names = FALSE, sep = ',')
+colnames(expressionDF)[1] <- "gName"
+```
+
+---
+
+#### First 6 genes of the expression data
+
+```{r headData, echo=FALSE}
+knitr::kable(head(expressionDF), format = "html")
+```
+
+---
+
+#### Grouping Samples and Treatments
+
+```{r sampleGrouping, echo=FALSE}
+groups <- data.frame(lapply(colnames(expressionDF)[-1],
+FUN=function(x){unlist(strsplit(x, split = '_neurons_'))}))
+colnames(groups) <- colnames(expressionDF)[-1]
+rownames(groups) <- c('CellType', 'Sample')
+samples <- data.frame(t(groups))
+knitr::kable(data.frame(samples))
+```
+
+---
+
+#### Some problems with the genes in the dataset
+
+There are presumably no non-coding transcripts in this expression data, given that the amount of genes is close to 20,000.
+
+Exact number of unique genes: `r length(unique(expressionDF[,1]))`
+
+```{r geneNames, echo=FALSE}
+#duplicated genes
+summarizedGeneCounts <- sort(table(expressionDF$gName),
+decreasing = TRUE)
+
+#see the ones that start with a number
+head(sort(expressionDF$gName, decreasing = FALSE))
+```
+
+Still, there is a problem with some of the gene names in this expression data: apparently, gene names such as MARCH1, or SEPT2 get converted into dates, 1-Mar and 2-Sep respectively, due to errors caused by spreadsheet programs' automatic conversion. If these genes end up important in our analyses moving on, we will deal with them one by one. See the article here: https://genomebiology.biomedcentral.com/articles/10.1186/s13059-016-1044-7
+
+---
+
+#### Filtering weakly expressed genes
+
+```{r filter, echo=FALSE}
+#translate out counts into counts per million using
+#the edgeR package function cpm
+cpms = edgeR::cpm(expressionDF[,-1])
+rownames(cpms) <- expressionDF$gName
+# get rid of low counts, n=3
+keep = rowSums(cpms >1) >=3
+expFiltered = expressionDF[keep,]
+```
+
+Percentage of genes that have been filtered: `r round(((nrow(expressionDF)-nrow(expFiltered))/nrow(expressionDF))*100, 2)`%. (`r (nrow(expressionDF)-nrow(expFiltered))` genes filtered)
+
+Number of genes after filtering: `r nrow(expFiltered)`.
+
+In the initial filtering step, genes that did not have more than 1 cpm (counts per million) less than 3 times were removed (n = 3x3) due to their weak expression levels, according to edgeR package data analysis instuctions. 
+
+```{r normalization, echo=FALSE}
+matFiltered <- as.matrix(expFiltered[,-1])
+rownames(matFiltered) <- expFiltered[,1]
+d <- edgeR::DGEList(counts = matFiltered, group = samples$CellType)
+d <- edgeR::calcNormFactors(d)
+normalizedCounts <- edgeR::cpm(d)
+```
+
+#### Normalization and Visualization of Expression Data
+
+##### Density of Data
+
+```{r plotDensity, echo=FALSE}
+par(mfrow = c(1,2))
+
+#graphing/plotting code comes form Prof. Ruth Isserlin's course material
+counts_density <- apply(log2(edgeR::cpm(expFiltered[,-1])),2, density)
+#calculate the limits across all the samples
+xlim <- 0; ylim <- 0
+for (i in 1:length(counts_density)) {
+  xlim <- range(c(xlim, counts_density[[i]]$x)); 
+  ylim <- range(c(ylim, counts_density[[i]]$y))
+}
+cols <- rainbow(length(counts_density))
+ltys <- rep(1, length(counts_density))
+#plot the first density plot to initialize the plot
+plot(counts_density[[1]], xlim=xlim, ylim=ylim, type="n", 
+         ylab="Smoothing density of log2-CPM", 
+         main="Filtered Expression Data", cex.lab = 0.85)
+#plot each line
+for (i in 1:length(counts_density)) 
+  lines(counts_density[[i]], col=cols[i], lty=ltys[i])
+#create legend
+legend("topright", samples$CellType,  
+           col=cols, lty=ltys, cex=0.75, 
+           border ="blue",  text.col = "green4", 
+           merge = TRUE, bg = "gray90")
+
+#2nd plot 
+counts_density2 <- apply(log2(edgeR::cpm(d)),2, density)
+#calculate the limits across all the samples
+xlim <- 0; ylim <- 0
+for (i in 1:length(counts_density2)) {
+  xlim <- range(c(xlim, counts_density2[[i]]$x)); 
+  ylim <- range(c(ylim, counts_density2[[i]]$y))
+}
+cols2 <- rainbow(length(counts_density2))
+ltys2 <- rep(1, length(counts_density2))
+#plot the first density plot to initialize the plot
+plot(counts_density2[[1]], xlim=xlim, ylim=ylim, type="n",
+     main="After Normalization", cex.lab = 0.85, xlab = "")
+#plot each line
+for (i in 1:length(counts_density)) 
+  lines(counts_density2[[i]], col=cols2[i], lty=ltys2[i])
+legend("topright", samples$CellType,  
+           col=cols, lty=ltys, cex=0.75, 
+           border ="blue",  text.col = "green4", 
+           merge = TRUE, bg = "gray90")
+
+```
+
+---
+
+##### MDS Plot
+
+```{r plotMDS, echo=FALSE}
+edgeR::plotMDS.DGEList(d, labels = rownames(samples), col = c("blue", "orange", "red")[factor(samples$CellType)], cex = 0.7, bg = 'lightgray')
+```
+
+The MDS plot shows that there is slight clustering of H and R versus some samples of NR clustering elsewhere. Although there still remains an NR sample that clusters with H, also being close to R samples. This indicates that the PCA signal that differentiates H,R with NR is not that strong.
+
+---
+
+##### BCV Plot
+
+```{r BCVanalysis, echo=FALSE}
+model_design <- model.matrix(~samples$CellType)
+dBCV <- edgeR::estimateDisp(d, model_design)
+edgeR::plotBCV(dBCV)
+```
+
+```{r identifierMapping, echo=FALSE}
+#uncomment the line below if there is problem with cURL (linux problem?)
+#httr::set_config(httr::config(ssl_verifypeer = 0L))
+ensembl <- biomaRt::useMart('ensembl')
+ensembl <- biomaRt::useDataset("hsapiens_gene_ensembl",mart=ensembl)
+a <- biomaRt::searchFilters(mart=ensembl, 'name')
+
+idConversion <- biomaRt::getBM(attributes = c("wikigene_name","hgnc_symbol"),
+filters = c("wikigene_name"),
+values = expFiltered$gName,
+mart = ensembl)
+```
+
+#### Identifier Mapping
+
+The dataset has it's genes readily mapped to their corresponding identifiers. There are a few gene names that do not have HUGO identifiers, such as: `r idConversion$wikigene_name[head(grep(idConversion$wikigene_name, pattern = "^LOC"), 3)]`
+
