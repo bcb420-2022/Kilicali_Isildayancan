@@ -1,0 +1,469 @@
+---
+title: "RNA Expression Analysis of Major Depressive Disorder and its Resistant Counterpart"
+author: "Kilicali Isildayancan"
+output:
+  html_document:
+    df_print: paged
+    toc: true
+    toc_depth: 2
+bibliography: a2.bib
+---
+```{r requiredPackages, warning=FALSE, message=FALSE}
+if (!require('ggplot2')) {
+  install.packages('ggplot2')
+  library('ggplot2')
+}
+if (!require('ComplexHeatmap')) {
+  install.packages('ComplexHeatmap')
+}
+if (!require('gprofiler2')) {
+  install.packages('gprofiler2')
+}
+if (!require('cowplot')) {
+  install.packages('cowplot')
+}
+if (!require('plotly')) {
+  install.packages('plotly')
+}
+```
+
+```{r allLegendsInit, echo=FALSE}
+MALegend <- "Figure 1: MA plot of Clustered P-values versus P-values of healthy (H) against resistant (NR) neurons."
+MA2Legend <- "Figure 2: MA plot of clustered p-values versus both p-values of healthy (H) against SSRI-treatable (R) and Resistant (NR) against SSRI-treatable neurons."
+heatmapLegend <- "Figure 3: Differential gene expression profiles of the individual groups shown as a heatmap."
+gpLegend <- "Figure 4: Manhattan plots of different sets of differentially expressed genes that were queried through G:Profiler. The figures represent in order: up-regulated HvNR genes; down-regulated HvR genes; all of the differentially up- and down-regulated genes combined."
+```
+
+<!-- Start-up code to get the dataset, and normalize it-->
+```{r initData, warning=FALSE, message=FALSE}
+# Getting the data from GEO
+datasetName <- 'GSE125664'
+suppFiles <- GEOquery::getGEOSuppFiles(datasetName)
+fileNames <- rownames(suppFiles)
+expressionDF <- read.delim(fileNames[1], header=TRUE,
+check.names = FALSE, sep = ',')
+colnames(expressionDF)[1] <- "HGNC_SYM"
+#Remove the duplicates - for some reason this doesn't work for MARCHF1/2 gene (1-Mar and 2-Mar)
+expressionDF <- expressionDF[rownames(expressionDF) == unique(rownames(expressionDF)),]
+# Naming treatments and samples
+groups <- data.frame(lapply(colnames(expressionDF)[-1],
+FUN=function(x){unlist(strsplit(x, split = '_neurons_'))}))
+colnames(groups) <- colnames(expressionDF)[-1]
+rownames(groups) <- c('CellType', 'Sample')
+samples <- data.frame(t(groups))
+
+#Change the initial DF colnames to group names, more tidy and easily understood (for me), format is TREATMENT.SAMPLE
+colnames(expressionDF)[-1] <- paste(samples$CellType, samples$Sample, sep = '.')
+
+#Removing low-count expressed genes from data
+cpms = edgeR::cpm(expressionDF[,-1])
+rownames(cpms) <- expressionDF$gName
+keep = rowSums(cpms >1) >=3
+expFiltered = expressionDF[keep,]
+
+#Normalizing data
+matFiltered <- as.matrix(expFiltered[,-1])
+rownames(matFiltered) <- expFiltered[,1]
+d <- edgeR::DGEList(counts = matFiltered, group = samples$CellType)
+d <- edgeR::calcNormFactors(d)
+normalizedCounts <- edgeR::cpm(d)
+```
+
+```{r geneNameFix}
+#As was mentioned in the previous assignment, some names were automatically converted to a date format. Here we fix this. There are only for MARCHF1-9 and SEPTIN1-15, not all of them are here. Also fix a duplicate issue without its removal.
+dateNames <- strsplit(rownames(normalizedCounts)[grep(pattern = "^[0-9]", rownames(normalizedCounts))], split = '-')
+fixedNames <- character(length(dateNames))
+for (i in 1:length(dateNames)) {
+  dNum <- dateNames[[i]][1]
+  dName <- dateNames[[i]][2]
+  if (dName == "Mar") {
+    fixedNames[i] <- paste('MARCHF', dNum, sep = '')
+  }
+  else if (dName == "Sep") {
+    fixedNames[i] <- paste('SEPTIN', dNum, sep = '')
+  }
+}
+#slightly modify the duplicates in this
+fixedNames[duplicated(fixedNames)] <- paste(fixedNames[duplicated(fixedNames)], '(duplicate)')
+#Put them back in
+rownames(normalizedCounts)[grep(pattern = "^[0-9]", rownames(normalizedCounts))] <- fixedNames
+
+#non exhaustive list of some of the serotonin receptors
+serotoninReceptors <- normalizedCounts[grep('^HTR', rownames(normalizedCounts)),]
+```
+
+## Introduction
+
+
+
+
+Major depressive disorder (MDD) is the leading disease among psychiatric disorders. After the transcriptomic analysis of Schizophrenia was made using differentiated patient neuron cells(originating from iPSC cells), the discovery of interesting patterns led researchers to investigate MDD using similar methodologies. SSRIs (Selective Serotonin Reuptake Inhibitors) are a class of compounds that is the most prescribed treatment to MDD, although there is a big percentage of the population (estimated around 30%) that don't respond to the drug. To investigate this on a genetic and transcriptomic level, similar iPSC-RNAseq assay was performed to reveal major differences between patient cell types [@mainPaperREF]. In this study, the authors surface-check the transcriptome to reveal the expression levels of serotonin receptors (5-HT receptor family). Three different groups were used, one healthy (H) group as control, one group with MDD that responds well to SSRIs (R - remittant), and the last group with MDD that didn't respond to the treatment (NR - non-remittant). One of the major findings of the study is that the cells derived from NR patients were hyper-reactive in response to 5-HT (5-hydroxyltryptamine, a.k.a. serotonin). The authors concluded that this hyper-reactivity response might be in part connected to the resistance observed.
+
+In the previous report, the raw supplementary GEO data set (Accession number: `r datasetName`) was cleaned up and normalized for further analysis. Some broken gene names were identified (such as 1-Mar instead of MARCHF1), and it is fixed in this version. In this report, differentially expressed genes that are statistically significant are analyzed and a simple functional profiling is queried through G:profiler web server via the R package [@gprofiler2REF] [G:Profiler](https://biit.cs.ut.ee/gprofiler) [@gprofilerREF].
+
+## Results
+### Modeling for P-values
+
+```{r modelingTreatment}
+#Build model for CellType
+treatment_model <- model.matrix(~samples$CellType)
+#Creating and naming the matrix
+expMatrix <- as.matrix(normalizedCounts)
+rownames(expMatrix) <- rownames(normalizedCounts)
+colnames(expMatrix) <- colnames(normalizedCounts)
+
+eSet <- Biobase::ExpressionSet(assayData = expMatrix)
+
+fit <- limma::lmFit(eSet, design = treatment_model)
+fit2 <- limma::eBayes(fit, trend = TRUE)
+
+totalTopFit <- limma::topTable(fit2,
+                          coef = ncol(treatment_model),
+                          adjust.method = "BH",
+                          number = nrow(expMatrix))
+totalTopFit <- totalTopFit[order(totalTopFit$P.Value),]
+
+sigGenesAll <- totalTopFit[totalTopFit$P.Value<0.05,]
+sigGeneCountAll <- nrow(totalTopFit[totalTopFit$P.Value<0.05,])
+```
+
+```{r splittingData_HvNR}
+HvNR <- normalizedCounts[,1:6]
+trt_model1 <- model.matrix(~samples$CellType[1:6])
+
+expMatrix <- as.matrix(HvNR)
+rownames(expMatrix) <- rownames(HvNR)
+colnames(expMatrix) <- colnames(HvNR)
+
+eSet <- Biobase::ExpressionSet(assayData = expMatrix)
+
+fit_1 <- limma::lmFit(eSet, design = trt_model1)
+fit2_1 <- limma::eBayes(fit_1, trend = TRUE)
+
+topHvNRfit <- limma::topTable(fit2_1,
+                          coef = ncol(trt_model1),
+                          adjust.method = "BH",
+                          number = nrow(expMatrix))
+topHvNRfit <- topHvNRfit[order(topHvNRfit$P.Value),]
+
+sigGenesHvNR <- topHvNRfit[topHvNRfit$P.Value<0.05,]
+sigGeneCountHvNR <- nrow(topHvNRfit[topHvNRfit$P.Value<0.05,])
+```
+
+```{r splittingData_HvR}
+HvR <- normalizedCounts[,c(1,2,3,7,8,9)]
+trt_model2 <- model.matrix(~samples$CellType[c(1,2,3,7,8,9)])
+
+expMatrix <- as.matrix(HvR)
+rownames(expMatrix) <- rownames(HvR)
+colnames(expMatrix) <- colnames(HvR)
+
+eSet <- Biobase::ExpressionSet(assayData = expMatrix)
+
+fit_2 <- limma::lmFit(eSet, design = trt_model2)
+fit2_2 <- limma::eBayes(fit_2, trend = TRUE)
+
+topHvRfit <- limma::topTable(fit2_2,
+                          coef = ncol(trt_model2),
+                          adjust.method = "BH",
+                          number = nrow(expMatrix))
+topHvRfit <- topHvRfit[order(topHvRfit$P.Value),]
+
+sigGenesHvR <- topHvRfit[topHvRfit$P.Value<0.05,]
+sigGeneCountHvR <- nrow(topHvRfit[topHvRfit$P.Value<0.05,])
+```
+
+```{r splittingData_NRvR}
+NRvR <- normalizedCounts[,4:9]
+trt_model3 <- model.matrix(~samples$CellType[4:9])
+
+expMatrix <- as.matrix(NRvR)
+rownames(expMatrix) <- rownames(NRvR)
+colnames(expMatrix) <- colnames(NRvR)
+
+eSet <- Biobase::ExpressionSet(assayData = expMatrix)
+
+fit_3 <- limma::lmFit(eSet, design = trt_model3)
+fit2_3 <- limma::eBayes(fit_3, trend = TRUE)
+
+topNRvRfit <- limma::topTable(fit2_3,
+                          coef = ncol(trt_model3),
+                          adjust.method = "BH",
+                          number = nrow(expMatrix))
+topNRvRfit <- topNRvRfit[order(topNRvRfit$P.Value),]
+sigGenesNRvR <- topNRvRfit[topNRvRfit$P.Value<0.05,]
+sigGeneCountNRvR <- nrow(topNRvRfit[topNRvRfit$P.Value<0.05,])
+```
+
+```{r comparisonPlotDataPrep}
+#totalTopFit, topHvNRfit-3 comparison
+totaled_Pvalues <- data.frame(identifier = rownames(totalTopFit), pvalue0 = totalTopFit$P.Value)
+HvR_Pvalues <- data.frame(identifier = rownames(topHvRfit), pvalue1 = topHvRfit$P.Value)
+HvNR_Pvalues <- data.frame(identifier = rownames(topHvNRfit), pvalue2 = topHvNRfit$P.Value)
+NRvR_Pvalues <- data.frame(identifier = rownames(topNRvRfit), pvalue3 = topNRvRfit$P.Value)
+
+plotData1 <- merge(totaled_Pvalues, HvR_Pvalues, by.x = 'identifier', by.y = 'identifier')
+plotData2 <- merge(totaled_Pvalues, HvNR_Pvalues, by.x = 'identifier', by.y = 'identifier')
+plotData3 <- merge(totaled_Pvalues, NRvR_Pvalues, by.x = 'identifier', by.y = 'identifier')
+```
+
+```{r comparisonPlots}
+# All three plots essentially do the same thing, plotting P-values of each combination of the treatments versus clustering all of them together.
+p1 <- ggplot(plotData1, aes(x = pvalue0, y = pvalue1)) + geom_point(aes(col = -sqrt(pvalue0**2 + pvalue1**2)), size = 0.5, alpha = 0.5, show.legend = FALSE) + geom_point(data = plotData1[grep(pattern = '^HTR', plotData1$identifier),], aes(x = pvalue0, y = pvalue1), col = 'darkred') + geom_hline(yintercept = 0.05, col = 'red', linetype = 'dashed') + geom_vline(xintercept = 0.05, col = 'red', linetype = 'dashed') + xlab('Clustered P-values') + ylab('Healthy v. Remittant, P-values')
+
+
+p2 <- ggplot(plotData2, aes(x = pvalue0, y = pvalue2)) + geom_point(aes(col = -(pvalue0 + pvalue2)), size = 0.5, alpha = 0.5, show.legend = FALSE) + geom_point(data = plotData2[grep(pattern = '^HTR', plotData2$identifier),], aes(x = pvalue0, y = pvalue2), col = 'darkred') + geom_hline(yintercept = 0.05, col = 'red', linetype = 'dashed') + geom_vline(xintercept = 0.05, col = 'red', linetype = 'dashed') + xlab('Clustered P-values') + ylab('Healthy v. Non-remittant, P-values')
+
+p3 <- ggplot(plotData3, aes(x = pvalue0, y = pvalue3)) + geom_point(aes(col = -(pvalue0 + pvalue3)), size = 0.5, alpha = 0.5, show.legend = FALSE) + geom_point(data = plotData3[grep(pattern = '^HTR', plotData3$identifier),], aes(x = pvalue0, y = pvalue3), col = 'darkred') + geom_hline(yintercept = 0.05, col = 'red', linetype = 'dashed') + geom_vline(xintercept = 0.05, col = 'red', linetype = 'dashed') + xlab('Clustered P-values') + ylab('Non-remittant v. Remittant, P-values') 
+
+#tried to plot all these side-by-side by using cowplot package. Doesn't work properly for 3 plots.
+# p1
+# p2
+# p3
+```
+
+```{r comparisonSupplemental}
+extraGenes <- setdiff(c(rownames(sigGenesNRvR),rownames(sigGenesHvNR), rownames(sigGenesHvR)), rownames(sigGenesAll))
+diseaseGenes <- intersect(rownames(sigGenesHvR), rownames(sigGenesHvNR))
+resistanceGenes <- setdiff(rownames(sigGenesNRvR), diseaseGenes)
+```
+
+```{r heatmapPlots}
+heatmapHvNR <- t(scale(t(HvNR[rownames(sigGenesHvNR),])))
+HvNRheatmap_col <- circlize::colorRamp2(c(min(heatmapHvNR), 0, max(heatmapHvNR)), c('red', 'black', 'green'))
+HvNR_heatmap <- ComplexHeatmap::Heatmap(as.matrix(heatmapHvNR), col = HvNRheatmap_col, show_row_names = FALSE, cluster_columns = FALSE, heatmap_legend_param = list(title = 'Expression Level'))
+
+heatmapHvR <- t(scale(t(HvR[rownames(sigGenesHvR),])))
+HvRheatmap_col <- circlize::colorRamp2(c(min(heatmapHvR), 0, max(heatmapHvR)), c('red', 'black', 'green'))
+HvR_heatmap <- ComplexHeatmap::Heatmap(as.matrix(heatmapHvR), col = HvRheatmap_col, show_row_names = FALSE, cluster_columns = TRUE, heatmap_legend_param = list(title = 'Expression Level'))
+
+
+heatmapNRvR <- t(scale(t(NRvR[rownames(sigGenesNRvR),])))
+NRvRheatmap_col <- circlize::colorRamp2(c(min(heatmapNRvR), 0, max(heatmapNRvR)), c('red', 'black', 'green'))
+NRvR_heatmap <- ComplexHeatmap::Heatmap(as.matrix(heatmapNRvR), col = NRvRheatmap_col, show_row_names = FALSE, cluster_columns = TRUE, heatmap_legend_param = list(title = 'Expression Level'))
+
+```
+
+```{r heatmapClusteringAssay, echo=FALSE, results=FALSE}
+# ComplexHeatmap::Heatmap(as.matrix(heatmapHvR), col = NRvRheatmap_col, show_row_names = FALSE, cluster_columns = TRUE, heatmap_legend_param = list(title = 'Expression Level'))
+# ComplexHeatmap::Heatmap(as.matrix(heatmapHvNR), col = NRvRheatmap_col, show_row_names = FALSE, cluster_columns = TRUE, heatmap_legend_param = list(title = 'Expression Level'))
+# ComplexHeatmap::Heatmap(as.matrix(heatmapNRvR), col = NRvRheatmap_col, show_row_names = FALSE, cluster_columns = TRUE, heatmap_legend_param = list(title = 'Expression Level'))
+```
+
+When all three treatments were compared in a clustered manner, there were `r sigGeneCountAll` significant genes that passed our conventional p-value threshold (p < 0.05). Initially to be more explicit in the analysis, the data was also split into three different combinations of treatments: Healthy against Non-remittant (HvNR); Healthy against Remittant (HvR); Non-remittant against Remittant (NRvR). The amount of statistically significant genes in these groups were `r sigGeneCountHvNR`, `r sigGeneCountHvR`, and `r sigGeneCountNRvR`, respectively. To not be distracted by the possible overlap of the gene names, the difference in the sets were investigated. There are `r length(extraGenes)` genes that are not present in the clustered method, that are present in one of the individual combinations. In addition, since the cells are all untreated, it is possible to classify them one by one and possibly select the genes that are responsible for each situation. Gene products that are both in HvNR and HvR groups could potentially be responsible for the underlying transcriptomic, genetic and epigenetic reasons that contribute to MDD. On the other hand, comparing NRvR (and excluding the genes mentioned before) could possibly point the direction to the resistance phenomenon discussed here. `r length(diseaseGenes)` genes were found at the intersection of HvNR and HvR, and `r length(resistanceGenes)` genes were found that were present in NRvR but not in the previous group. To note, none of the genes in any data passed the p-value threshold after multiple hypothesis testing (Benjamini-Hochberg).
+
+
+### Comparing P-values of Clustered Analysis against Individual Groupings
+
+The p-values were plotted to construct an MA plot, to show the difference between individual combinations and clustering of the samples. The genes highlighted were HRT (5-HT receptor) genes, and are highly significant to the study. The dashed line indicates the p-value threshold that was set.
+
+```{r p1_MAplot, fig.cap=MALegend}
+p1
+```
+
+
+From this plot we can see an eye-catching x=y distribution, hinting towards the similarity of the p-values of respective genes in both clustered and HvNR groups. This indicates that information previously buried in HvR, and NRvR groups might be lost in the clustered example.
+
+```{r p2and3_MAplot, fig.cap=MA2Legend}
+cowplot::plot_grid(p2, p3)
+```
+
+The highlighted points in the plots only appear significant in both of these plots in the individually grouped treatments HvR and NRvR.
+
+
+### Transciption Expression Maps and Its' Signal
+
+With all of the information mentioned above, it was decided to continue with three different groupings of the data, being more explicit to the disease and drug-resistant conditions as well as because it has a bigger search field.
+From this, heat maps of the significantly expressed genes were plotted. In the heat maps, red signifies lowest expression, going to green through a transition in black, signifying higher expression levels. Looking at the clustering algorith supplied by the ComplexHeatmap package in R [@complexHeatmapREF], we can see clustering in both HvR and NRvR, but not precisely in HvNR. HvNR condition clusters semi-correctly, having an outlier condition that disrupts the proper clustering. This was somewhat visible in the PC analysis done in the earlier report where there wasn't an obvious clustering of treatments, but nevertheless had some type of grouping between them.
+
+```{r heatMapPlots, fig.cap= heatmapLegend}
+HvNR_heatmap
+HvNR_heatmap
+HvNR_heatmap
+```
+
+As it is visible, all three of the plots clearly show a pattern of differential expression in genes.
+
+```{r thresholdedList}
+# top genes for healthy vs. resistant (HvNR)
+upRegHvNR <- topHvNRfit[(topHvNRfit$P.Value < 0.05 & topHvNRfit$logFC > 0),]
+downRegHvNR <- topHvNRfit[(topHvNRfit$P.Value < 0.05 & topHvNRfit$logFC < 0),]
+
+#top genes for healthy vs. remittant (HvR)
+upRegHvR <- topHvRfit[(topHvRfit$P.Value < 0.05 & topHvRfit$logFC > 0),]
+downRegHvR <- topHvRfit[(topHvRfit$P.Value < 0.05 & topHvRfit$logFC < 0),]
+
+#top genes for resistant vs. remittant (NRvR)
+upRegNRvR <- topNRvRfit[(topNRvRfit$P.Value < 0.05 & topNRvRfit$logFC > 0),]
+downRegNRvR <- topNRvRfit[(topNRvRfit$P.Value < 0.05 & topNRvRfit$logFC < 0),]
+
+
+
+```
+
+```{r extraForLocal, eval=FALSE, echo=FALSE}
+
+#These are all for 
+# expGeneList <- c(rownames(upRegHvNR), upRegHvR, upRegNRvR,
+#                 downRegHvNR, downRegHvR, downRegNRvR)
+# fileNames <- c('upRegHvNR', 'upRegHvR', 'upRegNRvR',
+#                 'downRegHvNR', 'downRegHvR', 'downRegNRvR')
+
+
+# Couldn't figure out a more 'elegant' way to do it. Writing all of them line by line. Tried sprintf, for loops, vectorized operations.
+# write(rownames(upRegHvNR), file = "./GSEA/upRegHvNR.txt", sep = "\n")
+# write(rownames(upRegHvR), file = "./GSEA/upRegHvR.txt", sep = "\n")
+# write(rownames(upRegNRvR), file = "./GSEA/upRegNRvR.txt", sep = "\n")
+# write(rownames(downRegHvNR), file = "./GSEA/downRegHvNR.txt", sep = "\n")
+# write(rownames(downRegHvR), file = "./GSEA/downRegHvR.txt", sep = "\n")
+# write(rownames(downRegNRvR), file = "./GSEA/downRegNRvR.txt", sep = "\n")
+
+```
+
+### Threshold Over-represenatation Analysis
+
+```{r gProfilerSearch, message=FALSE, warning=FALSE}
+gostUpHvNR <- gprofiler2::gost(
+  rownames(upRegHvNR),
+  organism = "hsapiens",
+  ordered_query = FALSE,
+  multi_query = FALSE,
+  significant = TRUE,
+  exclude_iea = TRUE,
+  measure_underrepresentation = FALSE,
+  evcodes = FALSE,
+  user_threshold = 0.05,
+  correction_method = c("g_SCS", "bonferroni", "fdr", "false_discovery_rate", "gSCS", "analytical"),
+  domain_scope = c("annotated", "known", "custom", "custom_annotated"),
+  custom_bg = NULL,
+  numeric_ns = "",
+  sources = c("GO:BP", "KEGG", "REAC"),
+  as_short_link = FALSE
+)
+gostUpHvR <- gprofiler2::gost(
+  rownames(upRegHvR),
+  organism = "hsapiens",
+  ordered_query = FALSE,
+  multi_query = FALSE,
+  significant = TRUE,
+  exclude_iea = TRUE,
+  measure_underrepresentation = FALSE,
+  evcodes = FALSE,
+  user_threshold = 0.05,
+  correction_method = c("g_SCS", "bonferroni", "fdr", "false_discovery_rate", "gSCS", "analytical"),
+  domain_scope = c("annotated", "known", "custom", "custom_annotated"),
+  custom_bg = NULL,
+  numeric_ns = "",
+  sources = c("GO:BP", "KEGG", "REAC"),
+  as_short_link = FALSE
+)
+gostUpNRvR <- gprofiler2::gost(
+  rownames(upRegNRvR),
+  organism = "hsapiens",
+  ordered_query = FALSE,
+  multi_query = FALSE,
+  significant = TRUE,
+  exclude_iea = TRUE,
+  measure_underrepresentation = FALSE,
+  evcodes = FALSE,
+  user_threshold = 0.05,
+  correction_method = c("g_SCS", "bonferroni", "fdr", "false_discovery_rate", "gSCS", "analytical"),
+  domain_scope = c("annotated", "known", "custom", "custom_annotated"),
+  custom_bg = NULL,
+  numeric_ns = "",
+  sources = c("GO:BP", "KEGG", "REAC"),
+  as_short_link = FALSE
+)
+
+#For the down-regulated genes, we mark the flag measure_underepresentation
+gostDownHvNR <- gprofiler2::gost(
+  rownames(downRegHvNR),
+  organism = "hsapiens",
+  ordered_query = FALSE,
+  multi_query = FALSE,
+  significant = TRUE,
+  exclude_iea = TRUE,
+  measure_underrepresentation = TRUE,     #here
+  evcodes = FALSE,
+  user_threshold = 0.05,
+  correction_method = c("g_SCS", "bonferroni", "fdr", "false_discovery_rate", "gSCS", "analytical"),
+  domain_scope = c("annotated", "known", "custom", "custom_annotated"),
+  custom_bg = NULL,
+  numeric_ns = "",
+  sources = c("GO:BP", "KEGG", "REAC"),
+  as_short_link = FALSE
+)
+gostDownHvR <- gprofiler2::gost(
+  rownames(downRegHvR),
+  organism = "hsapiens",
+  ordered_query = FALSE,
+  multi_query = FALSE,
+  significant = TRUE,
+  exclude_iea = TRUE,
+  measure_underrepresentation = TRUE,
+  evcodes = FALSE,
+  user_threshold = 0.05,
+  correction_method = c("g_SCS", "bonferroni", "fdr", "false_discovery_rate", "gSCS", "analytical"),
+  domain_scope = c("annotated", "known", "custom", "custom_annotated"),
+  custom_bg = NULL,
+  numeric_ns = "",
+  sources = c("GO:BP", "KEGG", "REAC"),
+  as_short_link = FALSE
+)
+gostDownNRvR <- gprofiler2::gost(
+  rownames(downRegNRvR),
+  organism = "hsapiens",
+  ordered_query = FALSE,
+  multi_query = FALSE,
+  significant = TRUE,
+  exclude_iea = TRUE,
+  measure_underrepresentation = TRUE,
+  evcodes = FALSE,
+  user_threshold = 0.05,
+  correction_method = c("g_SCS", "bonferroni", "fdr", "false_discovery_rate", "gSCS", "analytical"),
+  domain_scope = c("annotated", "known", "custom", "custom_annotated"),
+  custom_bg = NULL,
+  numeric_ns = "",
+  sources = c("GO:BP", "KEGG", "REAC"),
+  as_short_link = FALSE
+)
+
+allGenesTogether <- gprofiler2::gost(
+  unique(c(rownames(upRegHvNR), rownames(upRegHvR), rownames(upRegNRvR), rownames(downRegHvNR), rownames(downRegHvR), rownames(downRegNRvR))),
+  organism = "hsapiens",
+  ordered_query = FALSE,
+  multi_query = FALSE,
+  significant = TRUE,
+  exclude_iea = TRUE,
+  measure_underrepresentation = TRUE,
+  evcodes = FALSE,
+  user_threshold = 0.05,
+  correction_method = c("g_SCS", "bonferroni", "fdr", "false_discovery_rate", "gSCS", "analytical"),
+  domain_scope = c("annotated", "known", "custom", "custom_annotated"),
+  custom_bg = NULL,
+  numeric_ns = "",
+  sources = c("GO:BP", "KEGG", "REAC"),
+  as_short_link = FALSE
+)
+
+
+
+```
+
+The genes that were differentially expressed were carried on for a functional analysis in G:Profiler. Other methods (i.e. DAVID, Panther, ENRICHR) were also used, but results from these are not shown here due to general redundancy in results. In the manhattan plot below, the most significant biological process (GO:BP), KEGG, and REAC functional analyses are shown. The functional analyses for NRvR data is not shown, due to lack of significant processes. When all of the genes from all conditions (HvNR, HvR, NRvR combined) were ran together as a query in G:Profiler, there was no significant biological process associated with the gene set except one (which is more or less arbitrary considering it's related to olfactory signaling pathway). To note, queries of down-regulated genes did not prove to provide significant results as well.
+
+```{r GOStPlotting, fig.cap=gpLegend}
+gprofiler2::gostplot(gostUpHvNR)
+gprofiler2::gostplot(gostDownHvR)
+gprofiler2::gostplot(allGenesTogether)
+```
+
+## Discussion
+
+In the analysis above, it can be seen by the visual representation of the over-representation analysis (up-regulated HvNR condition) that the differentially expressed genes are significantly involved in processes associated with neurons. We can see that in the REAC and KEGG results, pathways associated with neurotransmitter release cycles and calcium signaling pathways. This is in accord with the authors in vitro observation of the resistant cells (NR group): the resistant cells were hyper-reactive in response to 5-HT stimulus, and an increase in calcium displacement occured. The authors then hypothesized that the resistance to SSRIs might be emerging from downstream neural connections and pathways of these hyper-reactive neurons.
+
+Interestingly, it is previously reported in the literature that 5-HT receptors (as GPCRs) function sometimes in oligomerized states that allow for functional cross-talk between them. Previous studies have specifically focused on 5-HT receptors and they reported that it dimerizes with glutamate receptors (specifically with mGlu2, or GRM2) [@crosstalkREF]. In the differentially expressed gene analysis, significant HvNR genes contained GRM7 and GRM5, whereas HvR genes contained GRM2 and GRM4. As mentioned above, the over-expression of GRM2 might be involved in the typical MDD, and another version of the glutamate receptor could be involved in the resistant MDD. In the ORA analysis, glutamatergic synapse as a biological function does pop up in the manhattan plot, although it does not pass the stringent significance criteria (p < 10^(-16)). Authors did not mention this in their paper, and this might be interesting to follow up on.
+
+## References
+
+
